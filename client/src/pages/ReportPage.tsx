@@ -1,0 +1,329 @@
+import { useEffect, useState, useRef } from "react";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
+import { api, Document, Session, Snapshot } from "../api";
+import { useAuth } from "../AuthContext";
+
+function formatDuration(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+interface ReportData {
+  doc: Document;
+  sessions: Session[];
+  snapshotCounts: number[];
+  totalActiveSeconds: number;
+  totalRevisions: number;
+  firstSession: Session;
+  lastSession: Session;
+}
+
+export default function ReportPage() {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const { user } = useAuth();
+  const [searchParams] = useSearchParams();
+  // Allow teacher viewing: pass ?authorName=...&authorEmail=...&back=/teacher/assignments/xxx
+  const authorName  = searchParams.get("authorName")  ?? user?.name  ?? "";
+  const authorEmail = searchParams.get("authorEmail") ?? user?.email ?? "";
+  const backPath    = searchParams.get("back") ?? `/documents/${id}`;
+  const [data, setData] = useState<ReportData | null>(null);
+  const [error, setError] = useState("");
+  const printRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    // Inject print styles
+    const style = document.createElement("style");
+    style.textContent = `@media print { .no-print { display: none !important; } body { background: white; } }`;
+    document.head.appendChild(style);
+    return () => document.head.removeChild(style);
+  }, []);
+
+  useEffect(() => {
+    if (!id) return;
+    async function load() {
+      try {
+        const doc = await api.documents.get(id!);
+        const sessions = await api.sessions.list(id!);
+
+        if (sessions.length === 0) {
+          setData({
+            doc,
+            sessions: [],
+            snapshotCounts: [],
+            totalActiveSeconds: 0,
+            totalRevisions: 0,
+            firstSession: null as any,
+            lastSession: null as any,
+          });
+          return;
+        }
+
+        const snapshotCounts = await Promise.all(
+          sessions.map((s) =>
+            api.snapshots.list(s.id).then((snaps: Snapshot[]) => snaps.length)
+          )
+        );
+
+        const totalActiveSeconds = sessions.reduce((sum, s) => sum + s.active_time_seconds, 0);
+        const totalRevisions = snapshotCounts.reduce((sum, c) => sum + c, 0);
+        const sorted = [...sessions].sort(
+          (a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime()
+        );
+
+        setData({
+          doc,
+          sessions,
+          snapshotCounts,
+          totalActiveSeconds,
+          totalRevisions,
+          firstSession: sorted[0],
+          lastSession: sorted[sorted.length - 1],
+        });
+      } catch {
+        setError("Failed to load report data.");
+      }
+    }
+    load();
+  }, [id]);
+
+  function handlePrint() {
+    window.print();
+  }
+
+  if (error) {
+    return (
+      <div style={s.center}>
+        <p style={{ color: "#ef4444" }}>{error}</p>
+        <button style={s.backBtn} onClick={() => navigate(backPath)}>
+          ← Back
+        </button>
+      </div>
+    );
+  }
+
+  if (!data) {
+    return <div style={s.center}>Loading report…</div>;
+  }
+
+  const { doc, sessions, totalActiveSeconds, totalRevisions, firstSession, lastSession } = data;
+  const wordCount = doc.final_text
+    ? doc.final_text.trim().split(/\s+/).filter(Boolean).length
+    : 0;
+
+  return (
+    <div style={s.page}>
+      {/* Nav — hidden on print */}
+      <header style={s.header} className="no-print">
+        <button style={s.backBtn} onClick={() => navigate(backPath)}>
+          ← Back
+        </button>
+        <button style={s.printBtn} onClick={handlePrint}>
+          Export PDF
+        </button>
+      </header>
+
+      {/* Report content */}
+      <div ref={printRef} style={s.reportWrapper}>
+        <div style={s.report}>
+          {/* Report header */}
+          <div style={s.reportHeader}>
+            <div style={s.reportBrand}>Draftly — Authorship Report</div>
+            <h1 style={s.reportTitle}>{doc.title}</h1>
+            <p style={s.reportMeta}>
+              Author: <strong>{authorName}</strong> &nbsp;·&nbsp; {authorEmail}
+            </p>
+            <p style={s.reportMeta}>
+              Generated: {formatDate(new Date().toISOString())}
+            </p>
+          </div>
+
+          <hr style={s.divider} />
+
+          {/* Stats */}
+          <div style={s.statsGrid}>
+            <StatCard label="Active Writing Time" value={formatDuration(totalActiveSeconds)} />
+            <StatCard label="Writing Sessions" value={String(sessions.length)} />
+            <StatCard label="Revisions Saved" value={String(totalRevisions)} />
+            <StatCard label="Final Word Count" value={String(wordCount)} />
+          </div>
+
+          <hr style={s.divider} />
+
+          {/* Timeline */}
+          {sessions.length > 0 && (
+            <>
+              <h2 style={s.sectionHeading}>Session Timeline</h2>
+              <table style={s.table}>
+                <thead>
+                  <tr>
+                    <th style={s.th}>#</th>
+                    <th style={s.th}>Started</th>
+                    <th style={s.th}>Active time</th>
+                    <th style={s.th}>Revisions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sessions.map((session, i) => (
+                    <tr key={session.id}>
+                      <td style={s.td}>{i + 1}</td>
+                      <td style={s.td}>{formatDate(session.start_time)}</td>
+                      <td style={s.td}>{formatDuration(session.active_time_seconds)}</td>
+                      <td style={s.td}>{data.snapshotCounts[i]}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              <hr style={s.divider} />
+
+              <div style={s.datesRow}>
+                <div>
+                  <span style={s.dateLabel}>First draft started</span>
+                  <p style={s.dateValue}>{formatDate(firstSession.start_time)}</p>
+                </div>
+                <div>
+                  <span style={s.dateLabel}>Last edit</span>
+                  <p style={s.dateValue}>
+                    {lastSession.end_time
+                      ? formatDate(lastSession.end_time)
+                      : "In progress"}
+                  </p>
+                </div>
+              </div>
+            </>
+          )}
+
+          {sessions.length === 0 && (
+            <p style={s.muted}>No writing sessions recorded yet.</p>
+          )}
+
+          {/* Footer */}
+          <div style={s.reportFooter}>
+            This report was generated by Draftly. It reflects process data collected
+            during writing, not analysis of the final text.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StatCard({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={sc.statCard}>
+      <div style={sc.statValue}>{value}</div>
+      <div style={sc.statLabel}>{label}</div>
+    </div>
+  );
+}
+
+const s: Record<string, React.CSSProperties> = {
+  page: { minHeight: "100vh", background: "#f1f5f9" },
+  center: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    minHeight: "100vh",
+    gap: "1rem",
+  },
+  header: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "0 1.5rem",
+    height: 56,
+    background: "#fff",
+    borderBottom: "1px solid #e2e8f0",
+    position: "sticky",
+    top: 0,
+    zIndex: 10,
+  },
+  backBtn: {
+    background: "none",
+    border: "none",
+    color: "#3b82f6",
+    cursor: "pointer",
+    fontSize: "0.875rem",
+    fontWeight: 600,
+  },
+  printBtn: {
+    padding: "0.5rem 1.25rem",
+    background: "#3b82f6",
+    color: "#fff",
+    border: "none",
+    borderRadius: 6,
+    fontSize: "0.875rem",
+    fontWeight: 600,
+    cursor: "pointer",
+  },
+  reportWrapper: {
+    display: "flex",
+    justifyContent: "center",
+    padding: "2.5rem 1.5rem",
+  },
+  report: {
+    background: "#fff",
+    borderRadius: 12,
+    padding: "3rem",
+    width: "100%",
+    maxWidth: 720,
+    boxShadow: "0 4px 24px rgba(15,23,42,0.08)",
+  },
+  reportBrand: { fontSize: "0.8rem", fontWeight: 600, color: "#94a3b8", letterSpacing: "0.05em", textTransform: "uppercase" },
+  reportHeader: { marginBottom: "1.5rem" },
+  reportTitle: { margin: "0.5rem 0 0.25rem", fontSize: "1.75rem", fontWeight: 700, color: "#1e293b" },
+  reportMeta: { margin: "0.25rem 0 0", fontSize: "0.875rem", color: "#64748b" },
+  divider: { border: "none", borderTop: "1px solid #e2e8f0", margin: "1.75rem 0" },
+  statsGrid: { display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "1rem" },
+  sectionHeading: { margin: "0 0 1rem", fontSize: "1rem", fontWeight: 600, color: "#334155" },
+  table: { width: "100%", borderCollapse: "collapse", fontSize: "0.875rem" },
+  th: {
+    textAlign: "left",
+    padding: "0.5rem 0.75rem",
+    background: "#f8fafc",
+    color: "#64748b",
+    fontWeight: 600,
+    fontSize: "0.8rem",
+    borderBottom: "1px solid #e2e8f0",
+  },
+  td: { padding: "0.6rem 0.75rem", borderBottom: "1px solid #f1f5f9", color: "#334155" },
+  datesRow: { display: "flex", gap: "3rem" },
+  dateLabel: { fontSize: "0.8rem", color: "#94a3b8", fontWeight: 600, textTransform: "uppercase" },
+  dateValue: { margin: "0.25rem 0 0", fontSize: "0.95rem", color: "#1e293b", fontWeight: 500 },
+  reportFooter: {
+    marginTop: "2rem",
+    fontSize: "0.8rem",
+    color: "#94a3b8",
+    borderTop: "1px solid #f1f5f9",
+    paddingTop: "1rem",
+    lineHeight: 1.6,
+  },
+  muted: { color: "#94a3b8" },
+};
+
+const sc: Record<string, React.CSSProperties> = {
+  statCard: {
+    background: "#f8fafc",
+    borderRadius: 8,
+    padding: "1.25rem",
+    border: "1px solid #e2e8f0",
+  },
+  statValue: { fontSize: "1.75rem", fontWeight: 700, color: "#1e293b", lineHeight: 1 },
+  statLabel: { marginTop: "0.4rem", fontSize: "0.8rem", color: "#64748b", fontWeight: 500 },
+};
