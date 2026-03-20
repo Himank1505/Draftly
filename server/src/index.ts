@@ -10,6 +10,7 @@ import snapshotsRouter   from "./routes/snapshots.js";
 import timelineRouter    from "./routes/timeline.js";
 import assignmentsRouter from "./routes/assignments.js";
 import submissionsRouter from "./routes/submissions.js";
+import aiRouter          from "./routes/ai.js";
 
 dotenv.config();
 
@@ -31,6 +32,7 @@ app.use("/api/snapshots",   snapshotsRouter);
 app.use("/api/timeline",    timelineRouter);
 app.use("/api/assignments", assignmentsRouter);
 app.use("/api/submissions", submissionsRouter);
+app.use("/api/ai",          aiRouter);
 
 app.listen(port, () => {
   console.log(`API running on http://localhost:${port}`);

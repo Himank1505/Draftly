@@ -1,0 +1,11 @@
+writing pattern using ml
+  1. AI Authorship Narrative (instructor-facing, high impact)                                                                                             After viewing a submission, Claude reads the session metrics (active time, paste count, revision count, keystroke events) and writes a 2-3 sentence     plain-English summary: "This student wrote in 3 focused sessions over 2 days, deleted and rewrote the second paragraph twice, and showed no signs of  
+  pasted content." Turns raw numbers into a teacher-readable verdict.                                                                                      
+                                                                                    
+  3. Writing Style Fingerprint (cross-submission, unique)                                                                                                 After a student has 2+ submissions, Claude compares vocabulary, sentence structure, and tone across them. Flags if the current submission is
+  stylistically inconsistent with the student's baseline — a signal for ghostwriting even when typing behavior looks clean.                                
+  4. Smart Writing Nudges (student-facing)                                                                                                                When a student is idle for >2 minutes, a small non-intrusive panel appears with Claude-generated prompts based on their assignment description and    
+  current text — questions like "What evidence supports your main point?" — to help them continue without giving them text to copy.                     
+
+  5. Revision Intelligence (student + instructor)                                                                                                         After the session, Claude analyzes the sequence of snapshots to narrate the student's revision arc: "You wrote a complete first draft, then 
+  restructured the intro, then expanded the conclusion." Students see it as a personal writing insight; teachers see it as evidence of genuine revision.

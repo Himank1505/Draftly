@@ -176,4 +176,39 @@ export const api = {
       }),
     mySubmissions: () => request<Submission[]>("/api/submissions/my"),
   },
+  ai: {
+    feedback: (document_id: string) =>
+      request<{ feedback: FeedbackItem[] }>("/api/ai/feedback", {
+        method: "POST",
+        body: JSON.stringify({ document_id }),
+      }),
+    detect: (document_id: string) =>
+      request<AiDetectionResult>("/api/ai/detect", {
+        method: "POST",
+        body: JSON.stringify({ document_id }),
+      }),
+    nudge: (document_id: string) =>
+      request<{ nudges: string[] }>("/api/ai/nudge", {
+        method: "POST",
+        body: JSON.stringify({ document_id }),
+      }),
+  },
 };
+
+export interface FeedbackItem {
+  type: "clarity" | "grammar" | "argument";
+  location: string;
+  note: string;
+}
+
+export interface AiDetectionFlag {
+  excerpt: string;
+  reason: string;
+}
+
+export interface AiDetectionResult {
+  score: number;
+  risk: "LOW" | "MEDIUM" | "HIGH";
+  summary: string;
+  flags: AiDetectionFlag[];
+}

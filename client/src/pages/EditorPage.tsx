@@ -1,26 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Descendant, Node } from "slate";
-import { api, KeystrokeEvent, Document } from "../api";
+import { api, KeystrokeEvent, Document, FeedbackItem } from "../api";
 import { useAuth } from "../AuthContext";
 import Editor from "../Editor";
+import FeedbackPanel from "../components/FeedbackPanel";
+import NudgePanel from "../components/NudgePanel";
 
 type SubmitStatus = "idle" | "submitting" | "submitted";
 
-const EMPTY_VALUE: Descendant[] = [{ type: "paragraph", children: [{ text: "" }] } as Descendant];
-const AUTOSAVE_INTERVAL = 10_000; // 10 seconds
-const ACTIVITY_TIMEOUT = 3_000;   // 3 seconds idle threshold
+const AUTOSAVE_INTERVAL = 10_000;
+const ACTIVITY_TIMEOUT = 3_000;
+const NUDGE_IDLE_SECONDS = 60; // 1 minute
 
-function serializeToText(nodes: Descendant[]): string {
-  return nodes.map((n) => Node.string(n)).join("\n");
-}
-
-function deserializeFromText(text: string | null): Descendant[] {
-  if (!text) return EMPTY_VALUE;
-  return text.split("\n").map((line) => ({
-    type: "paragraph",
-    children: [{ text: line }],
-  })) as Descendant[];
+function stripHtml(html: string): string {
+  return html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function countWords(text: string): number {
@@ -41,10 +34,16 @@ export default function EditorPage() {
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("saved");
   const [loadError, setLoadError] = useState("");
   const [submitStatus, setSubmitStatus] = useState<SubmitStatus>("idle");
+  const [showFeedback, setShowFeedback] = useState(false);
+  const [feedback, setFeedback] = useState<FeedbackItem[]>([]);
+  const [feedbackLoading, setFeedbackLoading] = useState(false);
+  const [feedbackError, setFeedbackError] = useState("");
+  const [nudges, setNudges] = useState<string[]>([]);
+  const [showNudge, setShowNudge] = useState(false);
 
   // Refs for session management — don't trigger re-renders
   const sessionIdRef = useRef<string | null>(null);
-  const contentRef = useRef<Descendant[]>(EMPTY_VALUE);
+  const contentRef = useRef<string>("");
   const prevTextRef = useRef<string>("");
   const lastSavedTextRef = useRef<string>("");
   const titleRef = useRef<string>("");
@@ -54,6 +53,9 @@ export default function EditorPage() {
   const pendingEventsRef = useRef<KeystrokeEvent[]>([]);
   const docIdRef = useRef<string | undefined>(id);
   const isMountedRef = useRef<boolean>(true);
+  const consecutiveIdleSecsRef = useRef<number>(0);
+  const nudgeShownRef = useRef<boolean>(false);
+  const showNudgeRef = useRef<boolean>(false);
 
   // Load document + start session
   useEffect(() => {
@@ -66,10 +68,11 @@ export default function EditorPage() {
         setDoc(d);
         setTitle(d.title);
         titleRef.current = d.title;
-        const text = d.final_text ?? "";
+        const html = d.final_text ?? "";
+        const text = stripHtml(html);
         prevTextRef.current = text;
         lastSavedTextRef.current = text;
-        contentRef.current = deserializeFromText(d.final_text);
+        contentRef.current = html;
 
         if (!isInstructor) {
           const session = await api.sessions.start(d.id);
@@ -82,6 +85,21 @@ export default function EditorPage() {
     init();
   }, [id]);
 
+  async function fetchNudge() {
+    if (!id || nudgeShownRef.current) return;
+    nudgeShownRef.current = true;
+    try {
+      const result = await api.ai.nudge(id);
+      if (result.nudges.length > 0 && isMountedRef.current) {
+        setNudges(result.nudges);
+        setShowNudge(true);
+        showNudgeRef.current = true;
+      }
+    } catch {
+      // nudges are non-critical — fail silently
+    }
+  }
+
   // Activity tracker: every second, classify as active or idle
   useEffect(() => {
     const interval = setInterval(() => {
@@ -89,11 +107,17 @@ export default function EditorPage() {
       const now = Date.now();
       if (lastActivityRef.current && now - lastActivityRef.current < ACTIVITY_TIMEOUT) {
         activeSecsRef.current += 1;
-      } else if (lastActivityRef.current) {
-        idleSecsRef.current += 1;
+        consecutiveIdleSecsRef.current = 0;
+      } else {
+        if (lastActivityRef.current) idleSecsRef.current += 1;
+        consecutiveIdleSecsRef.current += 1;
+        if (consecutiveIdleSecsRef.current === NUDGE_IDLE_SECONDS && !nudgeShownRef.current) {
+          fetchNudge();
+        }
       }
     }, 1000);
     return () => clearInterval(interval);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Auto-save: every 10 seconds flush everything
@@ -115,7 +139,7 @@ export default function EditorPage() {
     const sessionId = sessionIdRef.current;
     if (!sessionId) return;
 
-    const text = serializeToText(contentRef.current);
+    const text = stripHtml(contentRef.current);
 
     // Save snapshot + update document if content changed
     if (text !== lastSavedTextRef.current) {
@@ -147,7 +171,7 @@ export default function EditorPage() {
     const sessionId = sessionIdRef.current;
     if (!sessionId) return;
 
-    const text = serializeToText(contentRef.current);
+    const text = stripHtml(contentRef.current);
 
     if (text !== lastSavedTextRef.current && text.trim()) {
       api.snapshots
@@ -172,13 +196,19 @@ export default function EditorPage() {
       .catch(() => {});
   }
 
-  function handleChange(value: Descendant[]) {
-    const newText = serializeToText(value);
+  function handleChange(html: string) {
+    const newText = stripHtml(html);
     const prevText = prevTextRef.current;
 
     if (newText !== prevText) {
       const delta = newText.length - prevText.length;
       lastActivityRef.current = Date.now();
+      consecutiveIdleSecsRef.current = 0;
+      nudgeShownRef.current = false;
+      if (showNudgeRef.current) {
+        setShowNudge(false);
+        showNudgeRef.current = false;
+      }
 
       pendingEventsRef.current.push({
         timestamp: new Date().toISOString(),
@@ -191,7 +221,7 @@ export default function EditorPage() {
       setSaveStatus("unsaved");
     }
 
-    contentRef.current = value;
+    contentRef.current = html;
   }
 
   async function handleTitleBlur() {
@@ -218,6 +248,22 @@ export default function EditorPage() {
     } catch {
       setSubmitStatus("idle");
       alert("Failed to submit. Please try again.");
+    }
+  }
+
+  async function handleGetFeedback() {
+    if (!id) return;
+    setShowFeedback(true);
+    setFeedbackLoading(true);
+    setFeedbackError("");
+    setFeedback([]);
+    try {
+      const result = await api.ai.feedback(id);
+      setFeedback(result.feedback);
+    } catch (err: any) {
+      setFeedbackError(err.message ?? "Failed to get feedback.");
+    } finally {
+      setFeedbackLoading(false);
     }
   }
 
@@ -265,6 +311,11 @@ export default function EditorPage() {
               </button>
             </>
           )}
+          {!isInstructor && (
+            <button style={s.outlineBtn} onClick={handleGetFeedback}>
+              Get Feedback
+            </button>
+          )}
           <button
             style={s.outlineBtn}
             onClick={() => navigate(`/documents/${id}/report`)}
@@ -287,15 +338,31 @@ export default function EditorPage() {
         </div>
       </header>
 
-      {/* Editor */}
-      <div style={s.editorArea}>
-        <Editor
-          key={doc.id}
-          initialValue={deserializeFromText(doc.final_text)}
-          onChange={handleChange}
-          readOnly={isInstructor}
-        />
+      {/* Editor + Feedback Panel */}
+      <div style={s.editorRow}>
+        <div style={s.editorArea}>
+          <Editor
+            key={doc.id}
+            initialValue={doc.final_text ?? ""}
+            onChange={handleChange}
+            readOnly={isInstructor}
+          />
+        </div>
+        {showFeedback && (
+          <FeedbackPanel
+            feedback={feedback}
+            loading={feedbackLoading}
+            error={feedbackError}
+            onClose={() => setShowFeedback(false)}
+          />
+        )}
       </div>
+      {showNudge && (
+        <NudgePanel
+          nudges={nudges}
+          onDismiss={() => { setShowNudge(false); showNudgeRef.current = false; }}
+        />
+      )}
     </div>
   );
 }
@@ -365,6 +432,11 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: "0.8rem",
     fontWeight: 600,
     cursor: "default",
+  },
+  editorRow: {
+    flex: 1,
+    display: "flex",
+    alignItems: "flex-start",
   },
   editorArea: {
     flex: 1,
