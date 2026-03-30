@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
-import { api, Document, Session, Snapshot, AiDetectionResult } from "../api";
+import { api, Document, Session, Snapshot, AiDetectionResult, ProcessRiskResult } from "../api";
 import { useAuth } from "../AuthContext";
 
 function formatDuration(seconds: number): string {
@@ -49,6 +49,14 @@ export default function ReportPage() {
   const [detection, setDetection] = useState<AiDetectionResult | null>(null);
   const [detectLoading, setDetectLoading] = useState(false);
   const [detectError, setDetectError] = useState("");
+
+  const [narrative, setNarrative] = useState("");
+  const [narrativeLoading, setNarrativeLoading] = useState(false);
+  const [narrativeError, setNarrativeError] = useState("");
+
+  const [processRisk, setProcessRisk] = useState<ProcessRiskResult | null>(null);
+  const [processRiskLoading, setProcessRiskLoading] = useState(false);
+  const [processRiskError, setProcessRiskError] = useState("");
 
   useEffect(() => {
     // Inject print styles
@@ -108,6 +116,36 @@ export default function ReportPage() {
 
   function handlePrint() {
     window.print();
+  }
+
+  async function handleProcessRisk() {
+    if (!id) return;
+    setProcessRiskLoading(true);
+    setProcessRiskError("");
+    setProcessRisk(null);
+    try {
+      const result = await api.ai.processRisk(id);
+      setProcessRisk(result);
+    } catch (err: any) {
+      setProcessRiskError(err.message ?? "Analysis failed.");
+    } finally {
+      setProcessRiskLoading(false);
+    }
+  }
+
+  async function handleNarrative() {
+    if (!id) return;
+    setNarrativeLoading(true);
+    setNarrativeError("");
+    setNarrative("");
+    try {
+      const result = await api.ai.narrative(id);
+      setNarrative(result.narrative);
+    } catch (err: any) {
+      setNarrativeError(err.message ?? "Failed to generate narrative.");
+    } finally {
+      setNarrativeLoading(false);
+    }
   }
 
   async function handleDetect() {
@@ -230,6 +268,131 @@ export default function ReportPage() {
 
           {sessions.length === 0 && (
             <p style={s.muted}>No writing sessions recorded yet.</p>
+          )}
+
+          {/* Process Risk — instructors only */}
+          {isInstructor && (
+            <>
+              <hr style={s.divider} />
+              <div style={s.aiDetectHeader}>
+                <h2 style={s.sectionHeading}>Process Risk Analysis</h2>
+                {!processRisk && (
+                  <button
+                    style={processRiskLoading ? s.detectBtnDisabled : s.detectBtn}
+                    onClick={handleProcessRisk}
+                    disabled={processRiskLoading}
+                    className="no-print"
+                  >
+                    {processRiskLoading ? "Analysing…" : "Run Analysis"}
+                  </button>
+                )}
+                {processRisk && (
+                  <button style={s.detectBtnOutline} onClick={handleProcessRisk} className="no-print">
+                    Re-run
+                  </button>
+                )}
+              </div>
+
+              {processRiskError && <div style={s.detectError}>{processRiskError}</div>}
+
+              {processRiskLoading && (
+                <div style={s.detectLoading}>
+                  <div style={s.spinner} />
+                  <span>Analysing writing process…</span>
+                </div>
+              )}
+
+              {processRisk && !processRiskLoading && (
+                <div style={s.detectResult}>
+                  <div style={s.scoreBadgeRow}>
+                    <div style={{ ...s.scoreBadge, ...riskStyle(processRisk.risk) }}>
+                      <span style={s.scoreNumber}>{processRisk.score}</span>
+                      <span style={s.scoreLabel}>Risk Score</span>
+                    </div>
+                    <div style={{ ...s.riskBadgeBase, ...riskBadgeColors[processRisk.risk] }}>
+                      {processRisk.risk} RISK
+                    </div>
+                  </div>
+
+                  {processRisk.flags.length === 0 && (
+                    <p style={s.detectSummary}>No suspicious process signals detected.</p>
+                  )}
+
+                  {processRisk.flags.length > 0 && (
+                    <div style={s.flagList}>
+                      <p style={s.flagsHeading}>Process signals</p>
+                      {processRisk.flags.map((flag, i) => (
+                        <div key={i} style={{
+                          ...s.flagItem,
+                          background: flag.severity === "high" ? "#fef2f2" : "#fefce8",
+                          borderColor: flag.severity === "high" ? "#fecaca" : "#fef08a",
+                        }}>
+                          <p style={{ ...s.flagExcerpt, color: flag.severity === "high" ? "#b91c1c" : "#713f12" }}>
+                            {flag.signal}
+                          </p>
+                          <p style={{ ...s.flagReason, color: flag.severity === "high" ? "#b91c1c" : "#854d0e" }}>
+                            {flag.detail}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <p style={s.detectDisclaimer}>
+                    Process risk is based on keystroke event data, not text content. Flags indicate
+                    anomalies worth reviewing — they are not proof of misconduct.
+                  </p>
+                </div>
+              )}
+
+              {!processRisk && !processRiskLoading && !processRiskError && (
+                <p style={s.muted}>Click "Run Analysis" to check for anomalies in the student's writing process.</p>
+              )}
+            </>
+          )}
+
+          {/* Authorship Narrative — instructors only */}
+          {isInstructor && (
+            <>
+              <hr style={s.divider} />
+              <div style={s.aiDetectHeader}>
+                <h2 style={s.sectionHeading}>Authorship Narrative</h2>
+                {!narrative && (
+                  <button
+                    style={narrativeLoading ? s.detectBtnDisabled : s.detectBtn}
+                    onClick={handleNarrative}
+                    disabled={narrativeLoading}
+                    className="no-print"
+                  >
+                    {narrativeLoading ? "Generating…" : "Generate Narrative"}
+                  </button>
+                )}
+                {narrative && (
+                  <button style={s.detectBtnOutline} onClick={handleNarrative} className="no-print">
+                    Regenerate
+                  </button>
+                )}
+              </div>
+
+              {narrativeError && <div style={s.detectError}>{narrativeError}</div>}
+
+              {narrativeLoading && (
+                <div style={s.detectLoading}>
+                  <div style={s.spinner} />
+                  <span>Summarising writing process…</span>
+                </div>
+              )}
+
+              {narrative && !narrativeLoading && (
+                <div style={s.narrativeCard}>
+                  <p style={s.narrativeText}>{narrative}</p>
+                </div>
+              )}
+
+              {!narrative && !narrativeLoading && !narrativeError && (
+                <p style={s.muted}>Click "Generate Narrative" to get a plain-English summary of how this student wrote their submission.</p>
+              )}
+            </>
           )}
 
           {/* AI Detection — instructors only */}
@@ -518,6 +681,18 @@ const s: Record<string, any> = {
     borderTop: "1px solid #f1f5f9",
     paddingTop: "0.75rem",
     lineHeight: 1.6,
+  },
+  narrativeCard: {
+    background: "#f0f9ff",
+    border: "1px solid #bae6fd",
+    borderRadius: 8,
+    padding: "1rem 1.25rem",
+  },
+  narrativeText: {
+    margin: 0,
+    fontSize: "0.95rem",
+    color: "#0c4a6e",
+    lineHeight: 1.7,
   },
 };
 

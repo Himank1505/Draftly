@@ -61,10 +61,18 @@ export interface Submission {
   submitted_at: string;
 }
 
+export interface ConfidenceBreakdownItem {
+  label: string;
+  score: number;
+  max: number;
+}
+
 export interface SubmissionWithDetails extends Submission {
   student_name: string;
   student_email: string;
   confidence: "HIGH" | "MEDIUM" | "LOW";
+  confidence_score: number;
+  confidence_breakdown: ConfidenceBreakdownItem[];
 }
 
 function getToken() {
@@ -192,6 +200,16 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ document_id }),
       }),
+    narrative: (document_id: string) =>
+      request<{ narrative: string }>("/api/ai/narrative", {
+        method: "POST",
+        body: JSON.stringify({ document_id }),
+      }),
+    processRisk: (document_id: string) =>
+      request<ProcessRiskResult>("/api/ai/process-risk", {
+        method: "POST",
+        body: JSON.stringify({ document_id }),
+      }),
   },
 };
 
@@ -204,6 +222,18 @@ export interface FeedbackItem {
 export interface AiDetectionFlag {
   excerpt: string;
   reason: string;
+}
+
+export interface ProcessRiskFlag {
+  signal: string;
+  detail: string;
+  severity: "high" | "medium" | "low";
+}
+
+export interface ProcessRiskResult {
+  risk: "HIGH" | "MEDIUM" | "LOW";
+  score: number;
+  flags: ProcessRiskFlag[];
 }
 
 export interface AiDetectionResult {

@@ -1,262 +1,84 @@
 import { Router, Response } from "express";
-import Anthropic from "@anthropic-ai/sdk";
-import { pool } from "../db.js";
 import { requireAuth, AuthRequest } from "../middleware/auth.js";
+import { generateFeedback } from "../ai-services/feedback/index.js";
+import { detectAiText } from "../ai-services/detection/text.js";
+import { analyzeProcessRisk } from "../ai-services/detection/process.js";
+import { generateNudges } from "../ai-services/behavior/index.js";
+import { generateNarrative } from "../ai-services/narrative/index.js";
 
 const router = Router();
 router.use(requireAuth);
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// Re-export types consumed by other modules
+export type { FeedbackItem } from "../ai-services/feedback/index.js";
 
-export interface FeedbackItem {
-  type: "clarity" | "grammar" | "argument";
-  location: string;
-  note: string;
+function handleError(err: any, res: Response, fallback: string) {
+  console.error(err);
+  res.status(err.status ?? 500).json({ error: err.message ?? fallback });
 }
 
-// POST /api/ai/feedback
+// POST /api/ai/feedback  — students only
 router.post("/feedback", async (req: AuthRequest, res: Response) => {
   const { document_id } = req.body as { document_id: string };
-  if (!document_id) {
-    res.status(400).json({ error: "document_id is required" });
-    return;
-  }
-
-  // Students only
-  if (req.userRole === "instructor") {
-    res.status(403).json({ error: "Feedback is for students only" });
-    return;
-  }
+  if (!document_id) { res.status(400).json({ error: "document_id is required" }); return; }
+  if (req.userRole === "instructor") { res.status(403).json({ error: "Feedback is for students only" }); return; }
 
   try {
-    // Fetch document — verify ownership
-    const docResult = await pool.query(
-      `SELECT d.final_text, a.title as assignment_title, a.description as assignment_description
-       FROM documents d
-       LEFT JOIN assignments a ON a.id = d.assignment_id
-       WHERE d.id = $1 AND d.user_id = $2`,
-      [document_id, req.userId]
-    );
-
-    const doc = docResult.rows[0];
-    if (!doc) {
-      res.status(404).json({ error: "Document not found" });
-      return;
-    }
-
-    const text = doc.final_text?.trim();
-    if (!text || text.length < 50) {
-      res.status(400).json({ error: "Write at least a few sentences before requesting feedback." });
-      return;
-    }
-
-    const assignmentContext = doc.assignment_title
-      ? `Assignment: "${doc.assignment_title}"${doc.assignment_description ? `\nPrompt: ${doc.assignment_description}` : ""}\n\n`
-      : "";
-
-    const message = await client.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 1024,
-      messages: [
-        {
-          role: "user",
-          content: `You are a writing coach reviewing a student's draft. Your job is to identify issues only — do NOT suggest replacement text, do NOT rewrite anything, and do NOT complete their thoughts.
-
-${assignmentContext}Student's draft:
-"""
-${text}
-"""
-
-Return a JSON array of feedback items. Each item must have:
-- "type": one of "clarity", "grammar", or "argument"
-- "location": a short quote (5-8 words) from the text that identifies where the issue is
-- "note": one sentence describing what is wrong, without providing a fix
-
-Rules:
-- Maximum 2 items per type (6 total max)
-- Only flag real issues, not stylistic preferences
-- Never write what the student should say instead
-- Return ONLY valid JSON, no explanation outside the array
-
-Example format:
-[
-  { "type": "clarity", "location": "the thing happened because of", "note": "This phrase is vague — it's unclear what 'the thing' refers to." },
-  { "type": "grammar", "location": "they was going to the", "note": "Subject-verb agreement error: 'they' requires 'were', not 'was'." }
-]`,
-        },
-      ],
-    });
-
-    const raw = message.content[0].type === "text" ? message.content[0].text : "";
-
-    let feedback: FeedbackItem[];
-    try {
-      // Extract JSON array even if Claude adds surrounding text
-      const match = raw.match(/\[[\s\S]*\]/);
-      feedback = match ? JSON.parse(match[0]) : [];
-    } catch {
-      feedback = [];
-    }
-
-    res.json({ feedback });
+    res.json(await generateFeedback({ documentId: document_id, userId: req.userId! }));
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to generate feedback" });
+    handleError(err, res, "Failed to generate feedback");
   }
 });
 
-// POST /api/ai/detect
+// POST /api/ai/detect  — instructors only
 router.post("/detect", async (req: AuthRequest, res: Response) => {
   const { document_id } = req.body as { document_id: string };
-  if (!document_id) {
-    res.status(400).json({ error: "document_id is required" });
-    return;
-  }
-
-  if (req.userRole !== "instructor") {
-    res.status(403).json({ error: "AI detection is for instructors only" });
-    return;
-  }
+  if (!document_id) { res.status(400).json({ error: "document_id is required" }); return; }
+  if (req.userRole !== "instructor") { res.status(403).json({ error: "AI detection is for instructors only" }); return; }
 
   try {
-    const docResult = await pool.query(
-      `SELECT final_text FROM documents WHERE id = $1`,
-      [document_id]
-    );
-
-    const doc = docResult.rows[0];
-    if (!doc) {
-      res.status(404).json({ error: "Document not found" });
-      return;
-    }
-
-    // Strip HTML tags (content is stored as TipTap HTML)
-    const text = (doc.final_text ?? "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-
-    if (text.length < 100) {
-      res.status(400).json({ error: "Document is too short for reliable AI detection." });
-      return;
-    }
-
-    const message = await client.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 1024,
-      messages: [
-        {
-          role: "user",
-          content: `You are an academic integrity tool analyzing whether a student essay was written by a human or generated by AI.
-
-Analyze the following text for signs of AI generation. Look for: unnaturally consistent sentence length, generic transitions ("Furthermore", "Moreover", "In conclusion"), lack of personal voice or specific details, perfect grammar with no natural errors, hedging phrases typical of AI ("It is important to note"), overly balanced structure, and absence of authentic perspective.
-
-Text to analyze:
-"""
-${text}
-"""
-
-Return a JSON object with exactly these fields:
-- "score": integer 0-100 representing probability the text is AI-generated (0 = definitely human, 100 = definitely AI)
-- "risk": one of "LOW", "MEDIUM", or "HIGH" (LOW = 0-30, MEDIUM = 31-65, HIGH = 66-100)
-- "summary": one sentence explaining the overall assessment
-- "flags": array of up to 5 objects, each with:
-  - "excerpt": exact short quote from the text (10-20 words) that looks AI-generated
-  - "reason": one sentence explaining why this excerpt is suspicious
-
-Return ONLY valid JSON, no text outside the object.`,
-        },
-      ],
-    });
-
-    const raw = message.content[0].type === "text" ? message.content[0].text : "";
-
-    let result;
-    try {
-      const match = raw.match(/\{[\s\S]*\}/);
-      result = match ? JSON.parse(match[0]) : null;
-    } catch {
-      result = null;
-    }
-
-    if (!result) {
-      res.status(500).json({ error: "Failed to parse detection result" });
-      return;
-    }
-
-    res.json(result);
+    res.json(await detectAiText({ documentId: document_id }));
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to run AI detection" });
+    handleError(err, res, "Failed to run AI detection");
   }
 });
 
-// POST /api/ai/nudge
-router.post("/nudge", async (req: AuthRequest, res: Response) => {
+// POST /api/ai/process-risk  — instructors only
+router.post("/process-risk", async (req: AuthRequest, res: Response) => {
   const { document_id } = req.body as { document_id: string };
-  if (!document_id) {
-    res.status(400).json({ error: "document_id is required" });
-    return;
-  }
-
-  if (req.userRole === "instructor") {
-    res.status(403).json({ error: "Nudges are for students only" });
-    return;
-  }
+  if (!document_id) { res.status(400).json({ error: "document_id is required" }); return; }
+  if (req.userRole !== "instructor") { res.status(403).json({ error: "Process risk analysis is for instructors only" }); return; }
 
   try {
-    const docResult = await pool.query(
-      `SELECT d.final_text, a.title as assignment_title, a.description as assignment_description
-       FROM documents d
-       LEFT JOIN assignments a ON a.id = d.assignment_id
-       WHERE d.id = $1 AND d.user_id = $2`,
-      [document_id, req.userId]
-    );
-
-    const doc = docResult.rows[0];
-    if (!doc) {
-      res.status(404).json({ error: "Document not found" });
-      return;
-    }
-
-    const text = (doc.final_text ?? "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-
-    const assignmentContext = doc.assignment_title
-      ? `Assignment: "${doc.assignment_title}"${doc.assignment_description ? `\nPrompt: ${doc.assignment_description}` : ""}\n\n`
-      : "";
-
-    const draftContext = text.length >= 30
-      ? `Student's current draft:\n"""\n${text.slice(0, 1200)}\n"""\n\n`
-      : "The student hasn't written much yet.\n\n";
-
-    const message = await client.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 256,
-      messages: [
-        {
-          role: "user",
-          content: `You are a writing coach helping a student who has paused. Generate 2-3 short Socratic questions to help them continue thinking. The questions must NOT give the student text to copy, suggest an answer, or complete their thoughts — only provoke reflection.
-
-${assignmentContext}${draftContext}Return a JSON array of 2-3 question strings. Each question must be under 15 words, open-ended, and specific to the assignment or draft.
-
-Example: ["What evidence best supports your main argument?", "How might a skeptic respond to your claim?"]
-
-Return ONLY valid JSON, no text outside the array.`,
-        },
-      ],
-    });
-
-    const raw = message.content[0].type === "text" ? message.content[0].text : "";
-
-    let nudges: string[];
-    try {
-      const match = raw.match(/\[[\s\S]*\]/);
-      nudges = match ? JSON.parse(match[0]) : [];
-    } catch {
-      nudges = [];
-    }
-
-    res.json({ nudges });
+    res.json(await analyzeProcessRisk({ documentId: document_id }));
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to generate nudges" });
+    handleError(err, res, "Failed to run process risk analysis");
+  }
+});
+
+// POST /api/ai/nudge  — students only
+router.post("/nudge", async (req: AuthRequest, res: Response) => {
+  const { document_id } = req.body as { document_id: string };
+  if (!document_id) { res.status(400).json({ error: "document_id is required" }); return; }
+  if (req.userRole === "instructor") { res.status(403).json({ error: "Nudges are for students only" }); return; }
+
+  try {
+    res.json(await generateNudges({ documentId: document_id, userId: req.userId! }));
+  } catch (err) {
+    handleError(err, res, "Failed to generate nudges");
+  }
+});
+
+// POST /api/ai/narrative  — instructors only
+router.post("/narrative", async (req: AuthRequest, res: Response) => {
+  const { document_id } = req.body as { document_id: string };
+  if (!document_id) { res.status(400).json({ error: "document_id is required" }); return; }
+  if (req.userRole !== "instructor") { res.status(403).json({ error: "Authorship narrative is for instructors only" }); return; }
+
+  try {
+    res.json(await generateNarrative({ documentId: document_id }));
+  } catch (err) {
+    handleError(err, res, "Failed to generate authorship narrative");
   }
 });
 

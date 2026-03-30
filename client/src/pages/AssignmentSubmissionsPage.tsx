@@ -1,6 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { api, Assignment, SubmissionWithDetails } from "../api";
+import { api, Assignment, SubmissionWithDetails, ConfidenceBreakdownItem } from "../api";
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleDateString("en-US", {
@@ -25,6 +25,7 @@ export default function AssignmentSubmissionsPage() {
   const [submissions, setSubmissions] = useState<SubmissionWithDetails[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [hoveredSubId, setHoveredSubId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -100,9 +101,19 @@ export default function AssignmentSubmissionsPage() {
                   </td>
                   <td style={s.td}>{formatDate(sub.submitted_at)}</td>
                   <td style={s.td}>
-                    <span style={{ ...s.badge, ...confidenceColor[sub.confidence] }}>
-                      {sub.confidence}
-                    </span>
+                    <div
+                      style={s.badgeWrapper}
+                      onMouseEnter={() => setHoveredSubId(sub.id)}
+                      onMouseLeave={() => setHoveredSubId(null)}
+                    >
+                      <span style={{ ...s.badge, ...confidenceColor[sub.confidence] }}>
+                        {sub.confidence}
+                        <span style={s.badgeScore}>{sub.confidence_score}/100</span>
+                      </span>
+                      {hoveredSubId === sub.id && (
+                        <ConfidencePopover breakdown={sub.confidence_breakdown} />
+                      )}
+                    </div>
                   </td>
                   <td style={s.td}>
                     <div style={s.actionBtns}>
@@ -123,6 +134,85 @@ export default function AssignmentSubmissionsPage() {
     </div>
   );
 }
+
+function ConfidencePopover({ breakdown }: { breakdown: ConfidenceBreakdownItem[] }) {
+  return (
+    <div style={p.popover}>
+      <div style={p.heading}>Score breakdown</div>
+      {breakdown.map((item) => (
+        <div key={item.label} style={p.row}>
+          <span style={p.label}>{item.label}</span>
+          <div style={p.barTrack}>
+            <div style={{ ...p.barFill, width: `${(item.score / item.max) * 100}%` }} />
+          </div>
+          <span style={p.pts}>+{item.score}<span style={p.max}>/{item.max}</span></span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const p: Record<string, React.CSSProperties> = {
+  popover: {
+    position: "absolute",
+    top: "calc(100% + 6px)",
+    left: 0,
+    zIndex: 50,
+    background: "#fff",
+    border: "1px solid #e2e8f0",
+    borderRadius: 8,
+    padding: "0.75rem 1rem",
+    boxShadow: "0 8px 24px rgba(15,23,42,0.12)",
+    minWidth: 240,
+    display: "flex",
+    flexDirection: "column",
+    gap: "0.5rem",
+  },
+  heading: {
+    fontSize: "0.72rem",
+    fontWeight: 700,
+    color: "#94a3b8",
+    textTransform: "uppercase",
+    letterSpacing: "0.05em",
+    marginBottom: "0.1rem",
+  },
+  row: {
+    display: "flex",
+    alignItems: "center",
+    gap: "0.5rem",
+  },
+  label: {
+    fontSize: "0.8rem",
+    color: "#475569",
+    width: 130,
+    flexShrink: 0,
+  },
+  barTrack: {
+    flex: 1,
+    height: 6,
+    background: "#f1f5f9",
+    borderRadius: 99,
+    overflow: "hidden",
+  },
+  barFill: {
+    height: "100%",
+    background: "#3b82f6",
+    borderRadius: 99,
+    transition: "width 0.2s",
+  },
+  pts: {
+    fontSize: "0.8rem",
+    fontWeight: 700,
+    color: "#1e293b",
+    width: 40,
+    textAlign: "right",
+    flexShrink: 0,
+  },
+  max: {
+    fontWeight: 400,
+    color: "#94a3b8",
+  },
+};
 
 const s: Record<string, React.CSSProperties> = {
   page: { minHeight: "100vh", background: "#f1f5f9" },
@@ -203,13 +293,25 @@ const s: Record<string, React.CSSProperties> = {
   },
   studentName: { fontWeight: 600, color: "#1e293b", fontSize: "0.9rem" },
   studentEmail: { color: "#94a3b8", fontSize: "0.78rem", marginTop: "0.1rem" },
-  badge: {
+  badgeWrapper: {
+    position: "relative",
     display: "inline-block",
+  },
+  badge: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "0.35rem",
     padding: "0.25rem 0.6rem",
     borderRadius: 4,
     fontSize: "0.78rem",
     fontWeight: 700,
     letterSpacing: "0.03em",
+    cursor: "default",
+  },
+  badgeScore: {
+    fontWeight: 400,
+    opacity: 0.7,
+    fontSize: "0.72rem",
   },
   actionBtns: { display: "flex", gap: "0.5rem" },
   reportBtn: {
