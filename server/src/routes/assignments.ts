@@ -220,8 +220,8 @@ router.get("/:id/submissions", async (req: AuthRequest, res: Response) => {
 
     const submissions = await Promise.all(
       submissionsResult.rows.map(async (sub) => {
-        const confidence = await computeConfidence(sub.document_id);
-        return { ...sub, confidence };
+        const { level, score, breakdown } = await computeConfidence(sub.document_id);
+        return { ...sub, confidence: level, confidence_score: score, confidence_breakdown: breakdown };
       })
     );
     res.json(submissions);
@@ -231,32 +231,117 @@ router.get("/:id/submissions", async (req: AuthRequest, res: Response) => {
   }
 });
 
-async function computeConfidence(documentId: string): Promise<"HIGH" | "MEDIUM" | "LOW"> {
-  const [sessRes, pasteRes, snapRes] = await Promise.all([
+export interface ConfidenceBreakdownItem {
+  label: string;
+  score: number;
+  max: number;
+}
+
+export interface ConfidenceResult {
+  level: "HIGH" | "MEDIUM" | "LOW";
+  score: number;
+  breakdown: ConfidenceBreakdownItem[];
+}
+
+async function computeConfidence(documentId: string): Promise<ConfidenceResult> {
+  const [sessRes, sessionListRes, snapRes, eventRes] = await Promise.all([
+    // Total active time
     pool.query(
       "SELECT COALESCE(SUM(active_time_seconds), 0) AS total FROM writing_sessions WHERE document_id = $1",
       [documentId]
     ),
+    // All sessions (for count + day span)
     pool.query(
-      `SELECT COUNT(*) AS cnt FROM keystroke_events ke
-       JOIN writing_sessions ws ON ws.id = ke.session_id
-       WHERE ws.document_id = $1 AND ke.event_type = 'paste'`,
+      "SELECT start_time, end_time FROM writing_sessions WHERE document_id = $1 ORDER BY start_time ASC",
       [documentId]
     ),
+    // Revision count
     pool.query(
       `SELECT COUNT(*) AS cnt FROM text_snapshots ts
        JOIN writing_sessions ws ON ws.id = ts.session_id
        WHERE ws.document_id = $1`,
       [documentId]
     ),
+    // Insert + delete event counts
+    pool.query(
+      `SELECT event_type, COUNT(*) AS cnt FROM keystroke_events ke
+       JOIN writing_sessions ws ON ws.id = ke.session_id
+       WHERE ws.document_id = $1 AND event_type IN ('insert', 'delete')
+       GROUP BY event_type`,
+      [documentId]
+    ),
   ]);
-  const totalActive = parseInt(sessRes.rows[0].total, 10);
-  const pasteCount  = parseInt(pasteRes.rows[0].cnt, 10);
-  const revisions   = parseInt(snapRes.rows[0].cnt, 10);
 
-  if (totalActive >= 300 && pasteCount <= 2 && revisions >= 3) return "HIGH";
-  if (totalActive >= 60  && pasteCount <= 5)                   return "MEDIUM";
-  return "LOW";
+  const totalActive  = parseInt(sessRes.rows[0].total, 10);
+  const sessions     = sessionListRes.rows;
+  const revisions    = parseInt(snapRes.rows[0].cnt, 10);
+
+  const eventCounts: Record<string, number> = {};
+  for (const row of eventRes.rows) {
+    eventCounts[row.event_type] = parseInt(row.cnt, 10);
+  }
+  const inserts = eventCounts["insert"] ?? 0;
+  const deletes = eventCounts["delete"] ?? 0;
+
+  // --- Signal 1: Active time (0–25 pts) ---
+  let timeScore = 0;
+  if      (totalActive >= 600) timeScore = 25;
+  else if (totalActive >= 300) timeScore = 20;
+  else if (totalActive >= 120) timeScore = 12;
+  else if (totalActive >= 60)  timeScore =  6;
+
+  // --- Signal 2: Session count (0–20 pts) ---
+  let sessionScore = 0;
+  if      (sessions.length >= 3) sessionScore = 20;
+  else if (sessions.length === 2) sessionScore = 14;
+  else if (sessions.length === 1) sessionScore =  7;
+
+  // --- Signal 3: Day span (0–15 pts) ---
+  let dayScore = 0;
+  if (sessions.length > 0) {
+    const first = new Date(sessions[0].start_time).getTime();
+    const lastRow = sessions[sessions.length - 1];
+    const last = lastRow.end_time
+      ? new Date(lastRow.end_time).getTime()
+      : new Date(lastRow.start_time).getTime();
+    const daySpan = Math.round((last - first) / (1000 * 60 * 60 * 24));
+    if      (daySpan >= 2) dayScore = 15;
+    else if (daySpan >= 1) dayScore =  8;
+    else                   dayScore =  3;
+  }
+
+  // --- Signal 4: Revision depth (0–20 pts) ---
+  let revScore = 0;
+  if      (revisions >= 15) revScore = 20;
+  else if (revisions >= 8)  revScore = 15;
+  else if (revisions >= 3)  revScore = 10;
+  else if (revisions >= 1)  revScore =  5;
+
+  // --- Signal 5: Delete ratio (0–20 pts) ---
+  // Healthy human writing has ~15–50% deletes relative to inserts
+  let deleteScore = 0;
+  if (inserts > 0) {
+    const ratio = deletes / inserts;
+    if      (ratio >= 0.10 && ratio <= 0.50) deleteScore = 20;
+    else if (ratio >= 0.05 && ratio <= 0.60) deleteScore = 10;
+    else if (ratio >  0)                     deleteScore =  5;
+  }
+
+  const total = timeScore + sessionScore + dayScore + revScore + deleteScore;
+  const level: "HIGH" | "MEDIUM" | "LOW" =
+    total >= 65 ? "HIGH" : total >= 35 ? "MEDIUM" : "LOW";
+
+  return {
+    level,
+    score: total,
+    breakdown: [
+      { label: "Writing duration",    score: timeScore,    max: 25 },
+      { label: "Session distribution", score: sessionScore, max: 20 },
+      { label: "Day span",            score: dayScore,     max: 15 },
+      { label: "Revision depth",      score: revScore,     max: 20 },
+      { label: "Edit behaviour",      score: deleteScore,  max: 20 },
+    ],
+  };
 }
 
 export default router;
